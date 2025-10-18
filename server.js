@@ -4,11 +4,16 @@ import TelegramBot from 'node-telegram-bot-api';
 import crypto from 'crypto';
 
 // --------- конфиг через ENV ----------
-const {
-  BOT_TOKEN,              // токен бота @BotFather
-  PORT = 8080,            // порт HTTP
-  ALLOWED_ORIGINS = '*'   // CORS: список доменов через запятую
-} = process.env;
+// BOT_TOKEN обязателен, иначе сервер сразу завершит работу.
+const BOT_TOKEN = process.env.BOT_TOKEN;
+
+// ALLOWED_ORIGINS — список доменов через запятую. Если '*', разрешены все.
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '*';
+
+// PORT может быть строкой. Парсим его в число; если в окружении пусто или не число,
+// используем порт 8080 (при локальном запуске). На Render процесс автоматически
+// устанавливает переменную PORT, и Number(...) корректно её преобразует.
+const port = Number(process.env.PORT) || 8080;
 
 if (!BOT_TOKEN) {
   console.error('ERROR: BOT_TOKEN is not set');
@@ -22,7 +27,11 @@ const app = express();
 app.use(express.json());
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS === '*' || ALLOWED_ORIGINS.split(',').map(s => s.trim()).includes(origin)) {
+    if (
+      !origin ||
+      ALLOWED_ORIGINS === '*' ||
+      ALLOWED_ORIGINS.split(',').map(s => s.trim()).includes(origin)
+    ) {
       return cb(null, true);
     }
     cb(new Error('Not allowed by CORS'));
@@ -30,8 +39,8 @@ app.use(cors({
 }));
 
 // --------- в памяти: очередь и активные матчи ----------
-const queue = new Map();     // userId -> { id, name, rating, ts }
-const matches = new Map();   // userId -> { opponent: { id, name, rating } }
+const queue = new Map();   // userId -> { id, name, rating, ts }
+const matches = new Map(); // userId -> { opponent: { id, name, rating } }
 
 // Утилита подбора ближайшего по рейтингу
 function findBestOpponent(my) {
@@ -40,7 +49,10 @@ function findBestOpponent(my) {
   for (const [id, u] of queue) {
     if (id === my.id) continue;
     const diff = Math.abs((u.rating ?? 1500) - (my.rating ?? 1500));
-    if (diff < bestDiff) { bestDiff = diff; bestId = id; }
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestId = id;
+    }
   }
   return bestId ? queue.get(bestId) : null;
 }
@@ -57,11 +69,16 @@ function verifyInitData(initData) {
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
 
-    const secretKey = crypto.createHmac('sha256', 'WebAppData')
+    const secretKey = crypto
+      .createHmac('sha256', 'WebAppData')
       .update(crypto.createHash('sha256').update(BOT_TOKEN).digest())
       .digest();
 
-    const hmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    const hmac = crypto
+      .createHmac('sha256', secretKey)
+      .update(dataCheckString)
+      .digest('hex');
+
     return hmac === hash;
   } catch {
     return false;
@@ -69,22 +86,31 @@ function verifyInitData(initData) {
 }
 
 // --------- HTTP API для фронтенда ----------
+
+// Добавить игрока в очередь и попытаться найти ему соперника
 app.post('/match', (req, res) => {
   const { id, name, rating, initData } = req.body || {};
 
-  // (Опционально) в проде лучше включить:
+  // (Опционально) в проде лучше включить проверку подписи:
   // if (!verifyInitData(initData)) return res.status(403).json({ error: 'bad initData' });
 
-  if (!id) return res.status(400).json({ error: 'id required' });
+  if (!id) {
+    return res.status(400).json({ error: 'id required' });
+  }
 
-  // Добавляем в очередь/обновляем
-  queue.set(String(id), { id: String(id), name, rating: Number(rating) || 1500, ts: Date.now() });
+  // Добавляем игрока или обновляем его данные в очереди
+  queue.set(String(id), {
+    id: String(id),
+    name,
+    rating: Number(rating) || 1500,
+    ts: Date.now(),
+  });
 
-  // Ищем лучшего по рейтингу
+  // Пытаемся найти подходящего соперника
   const me = queue.get(String(id));
   const opponent = findBestOpponent(me);
   if (opponent) {
-    // матч найден
+    // Матч найден: удаляем игроков из очереди
     queue.delete(String(id));
     queue.delete(String(opponent.id));
 
@@ -94,15 +120,18 @@ app.post('/match', (req, res) => {
     matches.set(me.id, { opponent: b });
     matches.set(opponent.id, { opponent: a });
 
-    // Уведомим через Telegram (не обязательно, но полезно)
+    // Можно уведомить игроков через Telegram
     bot.sendMessage(a.id, `Matched vs ${b.name} (${b.rating})`);
     bot.sendMessage(b.id, `Matched vs ${a.name} (${a.rating})`);
 
     return res.json({ matched: true, opponent: b });
   }
+
+  // Пока соперник не найден
   res.json({ matched: false });
 });
 
+// Проверить, найден ли соперник для указанного userId
 app.get('/match/:id', (req, res) => {
   const id = String(req.params.id);
   const m = matches.get(id);
@@ -114,14 +143,24 @@ app.get('/match/:id', (req, res) => {
 });
 
 // --------- обработка web_app_data от клиента (если используете sendData) ----------
-bot.on('message', async (msg) => {
+bot.on('message', async msg => {
   if (!msg?.web_app_data?.data) return;
   let payload;
-  try { payload = JSON.parse(msg.web_app_data.data); } catch { return; }
+  try {
+    payload = JSON.parse(msg.web_app_data.data);
+  } catch {
+    return;
+  }
 
   if (payload.action === 'findOpponent') {
     const { id, name, rating } = payload;
-    queue.set(String(id), { id: String(id), name, rating: Number(rating) || 1500, ts: Date.now() });
+
+    queue.set(String(id), {
+      id: String(id),
+      name,
+      rating: Number(rating) || 1500,
+      ts: Date.now(),
+    });
 
     const me = queue.get(String(id));
     const opponent = findBestOpponent(me);
@@ -131,6 +170,7 @@ bot.on('message', async (msg) => {
 
       const a = { id: me.id, name: me.name, rating: me.rating };
       const b = { id: opponent.id, name: opponent.name, rating: opponent.rating };
+
       matches.set(me.id, { opponent: b });
       matches.set(opponent.id, { opponent: a });
 
@@ -142,4 +182,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Server is running on :${PORT}`));
+// --------- запуск сервера ----------
+app.listen(port, () => {
+  console.log(`Server is running on :${port}`);
+});
