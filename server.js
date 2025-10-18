@@ -3,16 +3,14 @@ import cors from 'cors';
 import TelegramBot from 'node-telegram-bot-api';
 import crypto from 'crypto';
 
-// --------- конфиг через ENV ----------
-// BOT_TOKEN обязателен, иначе сервер сразу завершит работу.
+// --------- config via ENV ----------
+// BOT_TOKEN is required; the server will exit if it's not provided.
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// ALLOWED_ORIGINS — список доменов через запятую. Если '*', разрешены все.
+// ALLOWED_ORIGINS — comma-separated list of allowed origins for CORS. Use '*' to allow any.
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '*';
 
-// PORT может быть строкой. Парсим его в число; если в окружении пусто или не число,
-// используем порт 8080 (при локальном запуске). На Render процесс автоматически
-// устанавливает переменную PORT, и Number(...) корректно её преобразует.
+// Determine port: parse process.env.PORT to a number; fallback to 8080 if not set or invalid.
 const port = Number(process.env.PORT) || 8080;
 
 if (!BOT_TOKEN) {
@@ -20,8 +18,14 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-// В простоте используем long-polling. Для prod лучше webhook.
+// Create Telegram bot in polling mode. Long polling will be used unless a webhook is configured.
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// Optionally delete any existing webhook to prevent conflicts when using long polling.
+// The method name is deleteWebHook (capital H) in node-telegram-bot-api.
+bot.deleteWebHook()
+  .then(() => console.log('Webhook deleted (if any)'))
+  .catch(err => console.error('Failed to delete webhook', err));
 
 const app = express();
 app.use(express.json());
@@ -38,11 +42,11 @@ app.use(cors({
   }
 }));
 
-// --------- в памяти: очередь и активные матчи ----------
+// --------- in-memory matchmaking data ---------
 const queue = new Map();   // userId -> { id, name, rating, ts }
 const matches = new Map(); // userId -> { opponent: { id, name, rating } }
 
-// Утилита подбора ближайшего по рейтингу
+// Helper to find the best opponent by rating difference.
 function findBestOpponent(my) {
   let bestId = null;
   let bestDiff = Infinity;
@@ -57,8 +61,7 @@ function findBestOpponent(my) {
   return bestId ? queue.get(bestId) : null;
 }
 
-// (Опционально) проверка подписи initData из Telegram WebApp
-// Рекомендуется ПЕРЕД тем как добавлять пользователя в очередь!
+// (Optional) verification of initData from Telegram WebApps. Recommended for production.
 function verifyInitData(initData) {
   try {
     const urlParams = new URLSearchParams(initData);
@@ -73,32 +76,28 @@ function verifyInitData(initData) {
       .createHmac('sha256', 'WebAppData')
       .update(crypto.createHash('sha256').update(BOT_TOKEN).digest())
       .digest();
-
     const hmac = crypto
       .createHmac('sha256', secretKey)
       .update(dataCheckString)
       .digest('hex');
-
     return hmac === hash;
   } catch {
     return false;
   }
 }
 
-// --------- HTTP API для фронтенда ----------
-
-// Добавить игрока в очередь и попытаться найти ему соперника
+// --------- HTTP API for the frontend ---------
+// Endpoint to add a player to the matchmaking queue and attempt to find a match.
 app.post('/match', (req, res) => {
   const { id, name, rating, initData } = req.body || {};
 
-  // (Опционально) в проде лучше включить проверку подписи:
-  // if (!verifyInitData(initData)) return res.status(403).json({ error: 'bad initData' });
+  // Uncomment the following lines to verify initData in production.
+  // if (!verifyInitData(initData)) {
+  //   return res.status(403).json({ error: 'bad initData' });
+  // }
 
-  if (!id) {
-    return res.status(400).json({ error: 'id required' });
-  }
+  if (!id) return res.status(400).json({ error: 'id required' });
 
-  // Добавляем игрока или обновляем его данные в очереди
   queue.set(String(id), {
     id: String(id),
     name,
@@ -106,11 +105,10 @@ app.post('/match', (req, res) => {
     ts: Date.now(),
   });
 
-  // Пытаемся найти подходящего соперника
   const me = queue.get(String(id));
   const opponent = findBestOpponent(me);
   if (opponent) {
-    // Матч найден: удаляем игроков из очереди
+    // Remove both players from the queue and create a match.
     queue.delete(String(id));
     queue.delete(String(opponent.id));
 
@@ -120,18 +118,18 @@ app.post('/match', (req, res) => {
     matches.set(me.id, { opponent: b });
     matches.set(opponent.id, { opponent: a });
 
-    // Можно уведомить игроков через Telegram
+    // Notify players via Telegram (optional but helpful).
     bot.sendMessage(a.id, `Matched vs ${b.name} (${b.rating})`);
     bot.sendMessage(b.id, `Matched vs ${a.name} (${a.rating})`);
 
     return res.json({ matched: true, opponent: b });
   }
 
-  // Пока соперник не найден
+  // No match found; keep the player in the queue.
   res.json({ matched: false });
 });
 
-// Проверить, найден ли соперник для указанного userId
+// Endpoint to check if a match has been found for a given player.
 app.get('/match/:id', (req, res) => {
   const id = String(req.params.id);
   const m = matches.get(id);
@@ -142,8 +140,8 @@ app.get('/match/:id', (req, res) => {
   res.json({ matched: false });
 });
 
-// --------- обработка web_app_data от клиента (если используете sendData) ----------
-bot.on('message', async msg => {
+// --------- Telegram WebApp data handler (if using sendData) ---------
+bot.on('message', async (msg) => {
   if (!msg?.web_app_data?.data) return;
   let payload;
   try {
@@ -154,7 +152,6 @@ bot.on('message', async msg => {
 
   if (payload.action === 'findOpponent') {
     const { id, name, rating } = payload;
-
     queue.set(String(id), {
       id: String(id),
       name,
@@ -182,7 +179,7 @@ bot.on('message', async msg => {
   }
 });
 
-// --------- запуск сервера ----------
+// --------- start the server ---------
 app.listen(port, () => {
   console.log(`Server is running on :${port}`);
 });
