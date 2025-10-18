@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-bot.deleteWebhook().catch(err => console.error('Failed to delete webhook', err));
 import TelegramBot from 'node-telegram-bot-api';
 import crypto from 'crypto';
 
