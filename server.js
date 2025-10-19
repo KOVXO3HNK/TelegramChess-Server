@@ -1,6 +1,13 @@
 import express from 'express';
 import cors from 'cors';
-import TelegramBot from 'node-telegram-bot-api';
+// Removed Telegram bot dependency.  The server previously created a
+// TelegramBot instance solely for deleting webhooks and starting
+// long‑polling, which caused runtime errors (EFATAL) in some
+// environments.  Since the game logic uses only HTTP endpoints
+// to communicate with clients, we no longer instantiate a
+// node‑telegram‑bot‑api client here.  If you wish to use bot
+// features (e.g. push notifications), you can add Telegram bot
+// logic separately outside of this server.
 import crypto from 'crypto';
 
 /*
@@ -27,19 +34,15 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '*';
 const port = Number(process.env.PORT) || 8080;
 
 if (!BOT_TOKEN) {
-  console.error('ERROR: BOT_TOKEN is not set');
-  process.exit(1);
+  // BOT_TOKEN is optional when not using node‑telegram‑bot‑api.  We
+  // warn instead of exiting so the HTTP server can still start.
+  console.warn('BOT_TOKEN is not set: Telegram bot functionality disabled');
 }
 
-// Start the Telegram bot in long‑polling mode.  Note that only one
-// instance of the bot may poll updates at a time; ensure that the same
-// token isn’t used elsewhere or you will see 409 errors.
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
-// Attempt to delete any existing webhook so that polling can operate.
-bot.deleteWebHook()
-  .then(() => console.log('Webhook deleted (if any)'))
-  .catch(err => console.error('Failed to delete webhook', err));
+// Removed TelegramBot instantiation and webhook deletion.  This server
+// communicates solely via HTTP endpoints and does not interact with
+// the Telegram Bot API directly.  To send messages via a bot, you
+// can integrate node‑telegram‑bot‑api in a separate module.
 
 // Express application setup
 const app = express();
