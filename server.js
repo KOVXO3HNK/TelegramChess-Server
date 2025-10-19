@@ -639,7 +639,7 @@ app.get('/match/:id', (req, res) => {
   const id = String(req.params.id);
   // Search through active games to see if this user is part of one
   for (const [gid, game] of games) {
-    if (game.players.w.id === id || game.players.b.id === id) {
+    if ((game.players.w.id === id || game.players.b.id === id) && !game.over) {
       const myColor = game.players.w.id === id ? 'w' : 'b';
       const opponent = myColor === 'w' ? game.players.b : game.players.w;
       return res.json({
@@ -751,6 +751,11 @@ app.post('/game/:id/move', (req, res) => {
     },
   };
   res.json(state);
+  // If the game has concluded, remove it from the active games map to
+  // prevent stale matches from being returned by GET /match/:id.
+  if (game.over) {
+    games.delete(gameId);
+  }
 });
 
 // GET /score/:id
