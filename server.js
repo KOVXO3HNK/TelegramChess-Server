@@ -83,6 +83,37 @@ const scoreboard = new Map();
 // }
 const games = new Map();
 
+// Timeout settings.  If a player does not make a move within this
+// period (in milliseconds), the game is declared forfeit and the
+// opponent wins.  Five minutes (300,000 ms) is the default.
+const MOVE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Check whether the given game has timed out.  If the time since the
+ * last move exceeds MOVE_TIMEOUT_MS and the game is not already over,
+ * declare the player whose turn it is the loser by timeout and update
+ * ratings accordingly.  Returns true if a timeout occurred.
+ *
+ * @param {object} game The game object stored in the games map
+ * @returns {boolean} Whether the game ended due to timeout
+ */
+function checkTimeout(game) {
+  if (!game || game.over) return false;
+  const now = Date.now();
+  if (game.lastMove && now - game.lastMove > MOVE_TIMEOUT_MS) {
+    // Determine loser and winner based on whose turn it is
+    const loserColor = game.engine.turn();
+    const winnerColor = loserColor === 'w' ? 'b' : 'w';
+    const winnerId = game.players[winnerColor].id;
+    const loserId = game.players[loserColor].id;
+    updateRatings(winnerId, loserId);
+    game.over = true;
+    game.result = { winnerId, loserId, reason: 'timeout' };
+    return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // SimpleChess implementation
 //
@@ -585,14 +616,19 @@ function createGame(playerA, playerB) {
   const black = whiteFirst ? playerB : playerA;
   const gameId = crypto.randomUUID();
   const engine = new SimpleChess();
-  games.set(gameId, {
+  const newGame = {
     id: gameId,
     players: { w: { id: white.id, name: white.name }, b: { id: black.id, name: black.name } },
     engine,
     turn: 'w',
     over: false,
     result: null,
-  });
+    // Track the timestamp of the last move.  When the game is created, the
+    // first move has not yet been made, so we initialise this to the
+    // current time.  Each successful move updates this value.
+    lastMove: Date.now(),
+  };
+  games.set(gameId, newGame);
   return { gameId, whiteId: white.id, blackId: black.id, fen: engine.fen() };
 }
 
@@ -666,10 +702,13 @@ app.get('/game/:id', (req, res) => {
     res.status(404).json({ error: 'game not found' });
     return;
   }
-  const { engine, players, turn, over, result } = game;
+  // Before returning the state, check whether the game has timed out.
+  // If a timeout occurs, update ratings and mark the game as over.
+  checkTimeout(game);
+  const { engine, players, over, result } = game;
   const state = {
     fen: engine.fen(),
-    turn,
+    turn: engine.turn(),
     over,
     result,
     players: {
@@ -692,11 +731,32 @@ app.post('/game/:id/move', (req, res) => {
     res.status(404).json({ error: 'game not found' });
     return;
   }
+  // Check for timeout before processing the move.  If the game has
+  // already timed out, respond with the final state and do not allow
+  // further moves.
+  if (checkTimeout(game)) {
+    // If the game has timed out before this move, return the final
+    // state as a normal response so clients can update their boards
+    // and ratings.  Do not attempt to process the move.
+    const { engine, players, over, result } = game;
+    const state = {
+      fen: engine.fen(),
+      turn: engine.turn(),
+      over,
+      result,
+      players: {
+        w: { id: players.w.id, name: players.w.name, rating: getRating(players.w.id) },
+        b: { id: players.b.id, name: players.b.name, rating: getRating(players.b.id) },
+      },
+    };
+    res.json(state);
+    return;
+  }
   if (!playerId || !from || !to) {
     res.status(400).json({ error: 'playerId, from and to are required' });
     return;
   }
-  const { engine, players, turn, over } = game;
+  const { engine, players, over } = game;
   if (over) {
     res.status(400).json({ error: 'game already over' });
     return;
@@ -719,8 +779,9 @@ app.post('/game/:id/move', (req, res) => {
     res.status(400).json({ error: 'illegal move' });
     return;
   }
-  // Update turn
+  // Update turn and timestamp of last move
   game.turn = engine.turn();
+  game.lastMove = Date.now();
   // Check for end of game
   let result = null;
   if (engine.in_checkmate()) {
@@ -751,11 +812,10 @@ app.post('/game/:id/move', (req, res) => {
     },
   };
   res.json(state);
-  // If the game has concluded, remove it from the active games map to
-  // prevent stale matches from being returned by GET /match/:id.
-  if (game.over) {
-    games.delete(gameId);
-  }
+  // Do not delete finished games; keeping them allows clients to
+  // retrieve final state and updated ratings.  When matching new
+  // opponents, GET /match/:id skips over finished games using the
+  // `over` flag.
 });
 
 // GET /score/:id
