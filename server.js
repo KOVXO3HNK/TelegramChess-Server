@@ -67,9 +67,12 @@ app.use(
 // are paired into a new game and removed from the queue.
 const queue = new Map();
 
-// scoreboard: maps userId to rating.  Default rating is 1500.  Ratings
-// persist for as long as the process runs; you can periodically
-// serialise this to disk or a database to maintain state across restarts.
+// scoreboard: maps userId to rating.  Players start with a default
+// rating (1500) unless otherwise specified.  Ratings persist for as
+// long as the process runs; you can periodically serialise this to
+// disk or a database to maintain state across restarts.  Ratings
+// increment and decrement based on game outcomes (+5 for a win,
+// -3 or -4 for a loss depending on the pre‑game ratings).
 const scoreboard = new Map();
 
 // games: maps gameId to game state.  Each entry has the shape:
@@ -572,17 +575,20 @@ class SimpleChess {
 // Rating helpers
 //
 function getRating(userId) {
+  // Return the player's rating, defaulting to 1500 if not yet set.
   return scoreboard.get(userId) ?? 1500;
 }
 
 function updateRatings(winnerId, loserId) {
   const winnerRating = getRating(winnerId);
   const loserRating = getRating(loserId);
+  // Winner gains 5 rating points
   const newWinnerRating = winnerRating + 5;
-  // If the loser’s rating is less than the winner’s, the loser loses 4 points;
-  // otherwise they lose 3 points.  Ratings never drop below 1.
-  const penalty = loserRating < winnerRating ? 4 : 3;
-  const newLoserRating = Math.max(1, loserRating - penalty);
+  // Loser loses 3 rating points normally; if loser has a higher rating
+  // than the winner before the game, they lose 4.  Ratings never
+  // drop below zero.
+  const penalty = loserRating > winnerRating ? 4 : 3;
+  const newLoserRating = Math.max(0, loserRating - penalty);
   scoreboard.set(winnerId, newWinnerRating);
   scoreboard.set(loserId, newLoserRating);
 }
@@ -642,7 +648,8 @@ app.post('/match', (req, res) => {
     res.status(400).json({ error: 'id and name are required' });
     return;
   }
-  // Ensure rating is a number
+  // Ensure rating is a number.  Determine this player's current rating
+  // from the scoreboard or use the provided rating as a starting value.
   const parsedRating = Number(rating) || getRating(id);
   // Save current rating to scoreboard if not present
   if (!scoreboard.has(id)) scoreboard.set(id, parsedRating);
@@ -715,6 +722,7 @@ app.get('/game/:id', (req, res) => {
       w: { id: players.w.id, name: players.w.name, rating: getRating(players.w.id) },
       b: { id: players.b.id, name: players.b.name, rating: getRating(players.b.id) },
     },
+    lastMove: game.lastMove,
   };
   res.json(state);
 });
@@ -790,6 +798,10 @@ app.post('/game/:id/move', (req, res) => {
     const loserColor = engine.turn();
     const winnerId = winnerColor === 'w' ? game.players.w.id : game.players.b.id;
     const loserId = loserColor === 'w' ? game.players.w.id : game.players.b.id;
+    // Update ratings when a checkmate occurs.  We previously used
+    // updateBalances() when jettons were used; however, the server now
+    // maintains a rating scoreboard.  Use updateRatings() to adjust
+    // Elo‑style ratings based on the game outcome.
     updateRatings(winnerId, loserId);
     result = { winnerId, loserId, reason: 'checkmate' };
     game.over = true;
@@ -807,6 +819,8 @@ app.post('/game/:id/move', (req, res) => {
     over: game.over,
     result: game.result,
     players: {
+      // Return up‑to‑date ratings for both players.  The client uses
+      // these values to display current ratings in the UI.
       w: { id: game.players.w.id, name: game.players.w.name, rating: getRating(game.players.w.id) },
       b: { id: game.players.b.id, name: game.players.b.name, rating: getRating(game.players.b.id) },
     },
